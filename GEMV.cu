@@ -1,48 +1,45 @@
-#define TILE 128   
+#define TILE_WIDTH 16
 
-//A is a matrix m x n
-//x is vector of length n
-//y is length m
-
-__global__
-void gemv_tiled_x(const float* __restrict__ A,
-                  const float* __restrict__ x,
-                  float* __restrict__ y,
-                  int m, int n)
+__global__ void vecMatMul(const float* __restrict__ M,
+                          const float* __restrict__ x,
+                          float* __restrict__ P,
+                          int m, int k)
 {
-    extern __shared__ float xds[];   
-
+    extern __shared__ float xds[];
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= m) return;
-
-    float acc = 0.0f;
-
-    int num_tiles = (n + TILE - 1) / TILE;
-
-    for (int t = 0; t < num_tiles; ++t)
-    {
-        int base = t * TILE;
-
-        for (int i = threadIdx.x; i < TILE; i += blockDim.x)
-        {
-            int k = base + i;
-            xds[i] = (k < n) ? x[k] : 0.0f;
-        }
-
+    float sum = 0.0f;
+    
+    int full_tiles = k / TILE_WIDTH;
+    int tail = k % TILE_WIDTH;
+    
+    for (int ph = 0; ph < full_tiles; ++ph) {
+        int kbase = ph * TILE_WIDTH;
+        if (threadIdx.x < TILE_WIDTH)
+            xds[threadIdx.x] = x[kbase + threadIdx.x];
         __syncthreads();
-
-        // Number of valid elements in this tile (handles last partial tile)
-        int limit = min(TILE, n - base);
-
-        // Dot product contribution for this tile
-        const float* Arow = &A[row * n + base];
-        for (int k = 0; k < limit; ++k)
-        {
-            acc += Arow[k] * xds[k];
+        
+        if (row < m) {
+            #pragma unroll
+            for (int i = 0; i < TILE_WIDTH; ++i){
+            sum += M[row * k + kbase + i] * xds[i];
+            }
         }
-
         __syncthreads();
     }
-
-    y[row] = acc;
+    
+    if (tail > 0) {
+        int kbase = full_tiles * TILE_WIDTH;
+        if (threadIdx.x < TILE_WIDTH)
+            xds[threadIdx.x] = (threadIdx.x < tail) ? x[kbase + threadIdx.x] : 0.0f;
+        __syncthreads();
+        
+        if (row < m) {
+            for (int i = 0; i < tail; ++i)
+                sum += M[row * k + kbase + i] * xds[i];
+        }
+        __syncthreads();
+    }
+    
+    if (row < m)
+        P[row] = sum;
 }
